@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>browser-player · 多路并发调度验证</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0 }
+    body {
+      background: #0d1117;
+      color: #e6edf3;
+      font: 14px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(22, 27, 34, .92);
+      backdrop-filter: blur(6px);
+      border-bottom: 1px solid #262d36;
+      padding: 10px 16px;
+      display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center;
+    }
+    .brand { font-weight: 700; white-space: nowrap }
+    .stats { display: flex; gap: 16px; flex-wrap: wrap; color: #8b98a5; font-size: 13px; min-width: 0 }
+    .stats b { color: #e6edf3; font-variant-numeric: tabular-nums }
+    @media (max-width: 900px) {
+      .stats, .controls { flex: 1 1 100%; margin-left: 0 }
+    }
+    .controls { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; min-width: 0 }
+    button, select {
+      background: #21262d; color: #e6edf3;
+      border: 1px solid #30363d; border-radius: 6px;
+      padding: 4px 10px; cursor: pointer; font-size: 13px;
+    }
+    .controls label { display: inline-flex; align-items: center; gap: 6px; color: #8b98a5; font-size: 13px; white-space: nowrap }
+    input[type="checkbox"] { accent-color: #4493f8; width: 14px; height: 14px; cursor: pointer }
+    button:hover { border-color: #4493f8 }
+    .hint { padding: 10px 16px; color: #8b98a5; border-bottom: 1px dashed #21262d; font-size: 13px }
+    .hint code { color: #a371f7 }
+    main.grid {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px; padding: 16px; margin-right: 344px;
+    }
+    @media (max-width: 1400px) {
+      main.grid { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+    }
+    @media (max-width: 900px) {
+      main.grid { grid-template-columns: 1fr; margin-right: 0 }
+      .panel { display: none }
+    }
+    .card {
+      background: #161b22; border: 1px solid #262d36; border-radius: 10px;
+      padding: 10px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px }
+    .card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+    .card-video { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; overflow: hidden }
+    .queue-mask {
+      position: absolute; inset: 0; z-index: 1; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(13, 17, 23, .72); color: #d29922;
+      font-size: 13px; letter-spacing: .05em;
+    }
+    .queue-mask.show { display: flex }
+    .card-bar, .card-url { display: flex; gap: 6px }
+    .card-url input {
+      flex: 1; min-width: 0;
+      background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+      border-radius: 6px; padding: 4px 8px; font-size: 12px;
+    }
+    .card-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap }
+    .chip {
+      font-size: 12px; padding: 1px 8px; border-radius: 999px;
+      border: 1px solid #30363d; color: #8b98a5; white-space: nowrap;
+    }
+    .chip.ok { color: #3fb950; border-color: #2ea043 }
+    .chip.warn { color: #d29922; border-color: #9e6a03 }
+    .chip.err { color: #f85149; border-color: #b62324 }
+    .panel {
+      position: fixed; right: 12px; top: 64px; bottom: 12px; width: 320px;
+      background: #161b22; border: 1px solid #262d36; border-radius: 10px;
+      padding: 12px; display: flex; flex-direction: column; gap: 8px; overflow: hidden;
+    }
+    .panel-title {
+      font-size: 12px; color: #8b98a5; letter-spacing: .05em;
+      border-bottom: 1px solid #21262d; padding-bottom: 4px;
+    }
+    #panel-instances {
+      display: flex; flex-direction: column; gap: 4px;
+      flex: 0 0 auto; max-height: 34%; min-height: 0; overflow-y: auto; font-size: 12px;
+    }
+    .inst-row { display: flex; align-items: center; gap: 6px; color: #8b98a5 }
+    .inst-row .nm { flex: 1; color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+    .inst-row .st { font-variant-numeric: tabular-nums }
+    .inst-row .dot { width: 8px; height: 8px; border-radius: 50%; background: #30363d; flex: none }
+    .inst-row .dot.on { background: #3fb950 }
+    #panel-log {
+      flex: 1 1 auto; min-height: 0; overflow-y: auto;
+      font: 12px/1.6 Consolas, Menlo, monospace;
+      display: flex; flex-direction: column; gap: 2px;
+    }
+    .log-line {
+      flex: 0 0 auto;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #8b98a5;
+    }
+    .log-active  { color: #3fb950 }
+    .log-inactive{ color: #d29922 }
+    .log-error   { color: #f85149 }
+    .log-ready   { color: #4493f8 }
+    .log-ctl     { color: #a371f7 }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">browser-player · 多路并发调度验证</div>
+    <div class="stats">
+      <span>并发上限 <b id="stat-max">–</b></span>
+      <span>活跃解码 <b id="stat-active">–</b></span>
+      <span>注册实例 <b id="stat-tasks">–</b></span>
+      <span>DOM video <b id="stat-dom">–</b></span>
+      <span>JS 堆 <b id="stat-heap">–</b></span>
+    </div>
+    <div class="controls">
+      <label>并发上限
+        <select id="ctl-max">
+          <option value="1">1（强制抢占）</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="8">8（对照组）</option>
+          <option value="16">16（全量并发）</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="ctl-resume" /> 断点续播</label>
+      <button id="ctl-playall">全部播放</button>
+      <button id="ctl-pauseall">全部暂停</button>
+      <button id="ctl-destroyall">全部销毁</button>
+      <button id="ctl-rebuild">重建全部</button>
+    </div>
+  </header>
+
+  <div class="hint">
+    验证要点：① 恒定只有 ≤ 上限路数真正解码（活跃解码数）；② 滚动离屏约 <code>1200ms</code> 后释放、滚回立即恢复；
+    ③ 可见实例超上限时立即抢占让位；④ 切到其他标签页再回来 → 全量释放后自动恢复；
+    ⑤ 「全部销毁」后 <code>注册实例</code> 与 <code>DOM video</code> 都应归零，无泄漏残留。
+  </div>
+
+  <main id="grid" class="grid"></main>
+
+  <aside class="panel">
+    <div class="panel-title">实例状态（每 500ms 轮询）</div>
+    <div id="panel-instances"></div>
+    <div class="panel-title">事件日志</div>
+    <div id="panel-log"></div>
+  </aside>
+
+  <script type="module" src="./.build/main.js"></script>
+</body>
+</html>
